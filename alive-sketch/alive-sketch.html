@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>A1F - Drawing Iterator</title>
+    <style>
+      body {
+        margin: 0;
+        padding: 20px;
+        overflow: hidden;
+        background-color: #888888;
+        font-family: Arial, sans-serif;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        min-height: 100vh;
+        transition: background-color 0.5s ease;
+      }
+      canvas {
+        display: block;
+        background-color: white;
+        border: 2px solid #333;
+        border-radius: 8px;
+        box-shadow: 0 4px 8px rgba(0, 0, 0, 0.3);
+      }
+      #ui {
+        margin-bottom: 20px;
+        z-index: 1000;
+        transition: opacity 0.3s ease;
+      }
+      #ui.hidden {
+        opacity: 0;
+        pointer-events: none;
+      }
+      button {
+        padding: 12px 24px;
+        font-size: 16px;
+        border: none;
+        border-radius: 6px;
+        background-color: #4caf50;
+        color: white;
+        cursor: pointer;
+        margin-right: 10px;
+        transition: background-color 0.3s;
+      }
+      button:hover {
+        background-color: #45a049;
+      }
+      button:disabled {
+        background-color: #cccccc;
+        cursor: not-allowed;
+      }
+      #clear-btn {
+        background-color: #f44336;
+      }
+      #clear-btn:hover {
+        background-color: #da190b;
+      }
+      #instructions {
+        background-color: rgba(255, 255, 255, 0.9);
+        padding: 15px;
+        border-radius: 6px;
+        max-width: 300px;
+        font-size: 14px;
+        line-height: 1.4;
+        z-index: 1000;
+        margin-bottom: 20px;
+        transition: opacity 0.3s ease;
+      }
+      #instructions.hidden {
+        opacity: 0;
+        pointer-events: none;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="ui">
+      <button id="start-btn" onclick="startIteration()">Start</button>
+      <button id="clear-btn" onclick="clearDrawing()">Clear</button>
+    </div>
+
+    <div id="instructions">
+      <strong>Instructions:</strong><br />
+      1. Hold left mouse button and drag to draw<br />
+      2. Click "Start" to iterate your drawing across the canvas<br />
+      3. Click "Clear" to start over
+    </div>
+
+    <script src="libraries/p5.min.js"></script>
+    <script src="A1F.js"></script>
+  </body>
+</html>
