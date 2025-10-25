@@ -8,6 +8,7 @@ const { Noise } = require("noisejs");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+const WORLD = { w: 800, h: 400 }; // shared world size
 
 // Increase JSON body limit to accommodate drawings
 app.use(express.json({ limit: "10mb" }));
@@ -39,6 +40,10 @@ app.post("/api/drawings", (req, res) => {
     timestamp: Date.now(),
   };
   drawings.push(item);
+  // create actor if missing
+  if (!actors[id]) createActorForDrawing(item);
+  // notify all connected clients so they can build assets immediately
+  io.emit("newDrawing", item);
   res.json({ ok: true, id });
 });
 
@@ -62,41 +67,49 @@ let tickAccumulatorMs = 0;
 function createActorForDrawing(d) {
   const w = Math.max(32, Math.ceil(d.bounds.maxX - d.bounds.minX));
   const h = Math.max(32, Math.ceil(d.bounds.maxY - d.bounds.minY));
+  let heading = Math.random() * Math.PI * 2;
+  if (d.anchors && d.anchors.mouth && d.anchors.back) {
+    const mx = d.anchors.mouth.x;
+    const my = d.anchors.mouth.y;
+    const bx = d.anchors.back.x;
+    const by = d.anchors.back.y;
+    // Face from back -> mouth so mouth is the front
+    heading = Math.atan2(my - by, mx - bx);
+  }
+  // Compute anchor offsets relative to image center in local (unrotated) space
+  let mouthOffset = { x: 0, y: 0 };
+  let backOffset = { x: 0, y: 0 };
+  if (d.anchors && d.anchors.mouth && d.anchors.back) {
+    const localMouth = {
+      x: d.anchors.mouth.x - d.bounds.minX,
+      y: d.anchors.mouth.y - d.bounds.minY,
+    };
+    const localBack = {
+      x: d.anchors.back.x - d.bounds.minX,
+      y: d.anchors.back.y - d.bounds.minY,
+    };
+    mouthOffset = { x: localMouth.x - w / 2, y: localMouth.y - h / 2 };
+    backOffset = { x: localBack.x - w / 2, y: localBack.y - h / 2 };
+  }
   actors[d.id] = {
     id: d.id,
-    pos: { x: Math.random() * 800 + 100, y: Math.random() * 400 + 100 },
+    pos: { x: Math.random() * WORLD.w, y: Math.random() * WORLD.h },
     vel: { x: 0, y: 0 },
     size: { w, h },
-    noise: { x: Math.random() * 1000, y: Math.random() * 1000 },
+    heading,
+    mouthOffset,
+    backOffset,
+    scale: 1,
+    noiseH: Math.random() * 1000,
+    noiseS: Math.random() * 2000,
     noiseSpeed: 0.35, // noise UV speed
     speedScale: 100, // px/sec
+    turnSpeed: 1.8, // rad/sec max turn rate
   };
 }
 
-// Create actors for any drawings already present
+// Create actors for any drawings already present (fresh boot)
 for (const d of drawings) createActorForDrawing(d);
-
-// When a new drawing is posted, also spawn an actor if missing
-const originalPostHandler = app._router.stack.find(
-  (l) => l.route && l.route.path === "/api/drawings" && l.route.methods.post
-).route.stack[0].handle;
-
-app._router.stack.find(
-  (l) => l.route && l.route.path === "/api/drawings" && l.route.methods.post
-).route.stack[0].handle = (req, res) => {
-  originalPostHandler(req, {
-    status: (...args) => res.status(...args),
-    json: (payload) => {
-      const body = req.body || {};
-      const id = payload && payload.id ? payload.id : body.id;
-      if (id && !actors[id]) {
-        const found = drawings.find((d) => d.id === id);
-        if (found) createActorForDrawing(found);
-      }
-      return res.json(payload);
-    },
-  });
-};
 
 setInterval(() => {
   const now = Date.now();
@@ -114,27 +127,76 @@ setInterval(() => {
 }, 1000 / TICK_HZ);
 
 function stepSimulation(dt) {
-  for (const a of Object.values(actors)) {
-    const nx = noise.perlin2(a.noise.x, 0);
-    const ny = noise.perlin2(a.noise.y, 0);
-    a.noise.x += a.noiseSpeed * dt;
-    a.noise.y += a.noiseSpeed * dt;
+  const arr = Object.values(actors);
+  const eatenEvents = [];
+  for (const a of arr) {
+    const hNoise = noise.perlin2(a.noiseH, 0); // [-1..1]
+    const sNoise = noise.perlin2(a.noiseS, 0); // [-1..1]
+    a.noiseH += a.noiseSpeed * dt;
+    a.noiseS += a.noiseSpeed * dt;
 
-    const angle = nx * Math.PI; // [-1..1] -> [-PI..PI]
-    const speed = (0.5 + 0.5 * ny) * a.speedScale; // px/sec
-    a.vel.x = Math.cos(angle) * speed;
-    a.vel.y = Math.sin(angle) * speed;
+    const turn = hNoise * a.turnSpeed; // rad/sec
+    a.heading += turn * dt;
+
+    const speed = (0.5 + 0.5 * sNoise) * a.speedScale; // px/sec
+    a.vel.x = Math.cos(a.heading) * speed;
+    a.vel.y = Math.sin(a.heading) * speed;
 
     a.pos.x += a.vel.x * dt;
     a.pos.y += a.vel.y * dt;
 
-    // generous wrap bounds (independent of client canvas)
-    const wrapW = 1920 + a.size.w;
-    const wrapH = 1080 + a.size.h;
+    // wrap inside WORLD
+    const wrapW = WORLD.w + a.size.w * a.scale;
+    const wrapH = WORLD.h + a.size.h * a.scale;
     if (a.pos.x < -a.size.w) a.pos.x = wrapW;
     if (a.pos.x > wrapW) a.pos.x = -a.size.w;
     if (a.pos.y < -a.size.h) a.pos.y = wrapH;
     if (a.pos.y > wrapH) a.pos.y = -a.size.h;
+  }
+
+  // Interactions: mouth(A) overlaps back(B) -> B eaten, A grows
+  const toRemove = new Set();
+  for (let i = 0; i < arr.length; i++) {
+    const A = arr[i];
+    if (toRemove.has(A.id)) continue;
+    for (let j = 0; j < arr.length; j++) {
+      if (i === j) continue;
+      const B = arr[j];
+      if (toRemove.has(B.id)) continue;
+      // compute world anchor positions
+      const cosA = Math.cos(A.heading),
+        sinA = Math.sin(A.heading);
+      const mouthAx =
+        A.pos.x + (A.mouthOffset.x * cosA - A.mouthOffset.y * sinA) * A.scale;
+      const mouthAy =
+        A.pos.y + (A.mouthOffset.x * sinA + A.mouthOffset.y * cosA) * A.scale;
+
+      const cosB = Math.cos(B.heading),
+        sinB = Math.sin(B.heading);
+      const backBx =
+        B.pos.x + (B.backOffset.x * cosB - B.backOffset.y * sinB) * B.scale;
+      const backBy =
+        B.pos.y + (B.backOffset.x * sinB + B.backOffset.y * cosB) * B.scale;
+
+      const dx = mouthAx - backBx;
+      const dy = mouthAy - backBy;
+      const dist2 = dx * dx + dy * dy;
+      const rA = Math.max(Math.min(A.size.w, A.size.h) * 0.12 * A.scale, 8);
+      const rB = Math.max(Math.min(B.size.w, B.size.h) * 0.12 * B.scale, 8);
+      const thresh = rA + rB;
+      if (dist2 <= thresh * thresh) {
+        // A eats B
+        toRemove.add(B.id);
+        // Grow A (cap growth to avoid runaway)
+        A.scale = Math.min(A.scale * 1.15, 4);
+        eatenEvents.push({ eaterId: A.id, preyId: B.id });
+      }
+    }
+  }
+  if (toRemove.size > 0) {
+    for (const id of toRemove) delete actors[id];
+    // notify clients immediately about eaten fish
+    for (const ev of eatenEvents) io.emit("eaten", ev);
   }
 }
 
@@ -144,12 +206,17 @@ function broadcastState() {
   if (now % Math.round(1000 / BROADCAST_HZ) > 20) return;
   io.emit("state", {
     t: now,
+    world: WORLD,
     actors: Object.values(actors).map((a) => ({
       id: a.id,
       x: a.pos.x,
       y: a.pos.y,
       vx: a.vel.x,
       vy: a.vel.y,
+      heading: a.heading,
+      scale: a.scale,
+      mouthOffset: a.mouthOffset,
+      backOffset: a.backOffset,
       w: a.size.w,
       h: a.size.h,
     })),
@@ -160,12 +227,17 @@ io.on("connection", (socket) => {
   // Send initial snapshot
   socket.emit("state", {
     t: Date.now(),
+    world: WORLD,
     actors: Object.values(actors).map((a) => ({
       id: a.id,
       x: a.pos.x,
       y: a.pos.y,
       vx: a.vel.x,
       vy: a.vel.y,
+      heading: a.heading,
+      scale: a.scale,
+      mouthOffset: a.mouthOffset,
+      backOffset: a.backOffset,
       w: a.size.w,
       h: a.size.h,
     })),
