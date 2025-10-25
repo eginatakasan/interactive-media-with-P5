@@ -11,7 +11,7 @@ var theme_island = {
 };
 
 const theme = theme_island;
-const squareSize = 1;
+const squareSize = 2;
 let offset = 10;
 let xScale = 0.015;
 let yScale = 0.03;
